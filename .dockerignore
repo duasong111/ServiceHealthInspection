@@ -1,0 +1,57 @@
+# 排除不必要文件，减小镜像 + 加快 build
+.git
+.gitignore
+.github
+.gitattributes
+
+# Python 缓存
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# 虚拟环境
+.venv
+venv/
+env/
+
+# IDE / 编辑器
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# 文档（不进镜像）
+README.md
+docs/
+*.md
+
+# 测试
+tests/
+test/
+*.py.test
+.pytest_cache
+
+# 本地脚本
+apply_dp_migration.py
+
+# 数据 / 日志 / 临时
+*.log
+logs/
+tmp/
+.env
+.env.local
+
+# Docker 相关
+Dockerfile
+docker-compose.yml
+.dockerignore
+entrypoint.sh
+
+# 设备端代码（不应打到后端镜像里）
+mqtt_cmd_handler.py

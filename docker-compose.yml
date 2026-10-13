@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: yt_service-postgres
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: gsm200818534
+      TZ: Asia/Shanghai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yt_service:latest
+    container_name: yt_service
+    # entrypoint 自动 wait-postgres + migrate，再 exec CMD
+    command:
+      - "uvicorn"
+      - "YTInternetBack.asgi:application"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--workers"
+      - "2"
+    volumes:
+      # 只挂载代码（开发用 hot-reload）；生产建议改 image tag，不挂载
+      - .:/app
+      # 防止容器里 manage.py / settings.py / mqtt_cmd_handler.py 被 host 覆盖
+      - /app/node_modules  # 占位避免冲突
+    ports:
+      - "8000:8000"
+    environment:
+      DJANGO_SETTINGS_MODULE: YTInternetBack.settings
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: postgres
+      DB_USER: postgres
+      DB_PASSWORD: gsm200818534
+      DB_HOST: yt_service-postgres
+      DB_PORT: "5432"
+      TZ: Asia/Shanghai
+      # MQTT
+      MQTT_BROKER_HOST: "8.134.128.64"
+      MQTT_BROKER_PORT: "1883"
+      MQTT_USERNAME: "yt_device"
+      MQTT_PASSWORD: "gsm200818534"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mqtt_retry_scheduler:
+    # 复用 web 的镜像（同一份代码）
+    image: yt_service:latest
+    container_name: yt_service-mqtt-retry
+    command:
+      - "python"
+      - "manage.py"
+      - "mqtt_retry_scheduler"
+    volumes:
+      - .:/app
+    environment:
+      DJANGO_SETTINGS_MODULE: YTInternetBack.settings
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: postgres
+      DB_USER: postgres
+      DB_PASSWORD: gsm200818534
+      DB_HOST: yt_service-postgres
+      DB_PORT: "5432"
+      TZ: Asia/Shanghai
+      # MQTT
+      MQTT_BROKER_HOST: "8.134.128.64"
+      MQTT_BROKER_PORT: "1883"
+      MQTT_USERNAME: "yt_device"
+      MQTT_PASSWORD: "gsm200818534"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      web:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
