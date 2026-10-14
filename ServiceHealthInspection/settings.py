@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     'Account.apps.AccountConfig',         # 登录/登出/当前用户
     'Inspector.apps.InspectorConfig',     # 巡检服务
     'Timing.apps.TimingConfig',           # 请求耗时
+
 ]
 
 MIDDLEWARE = [
@@ -102,12 +103,12 @@ WSGI_APPLICATION = 'ServiceHealthInspection.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'intellicamera',
-        'USER': 'postgres',
-        'PASSWORD': 'gsm200818534',
-        'HOST': '10.1.1.136',
-        'PORT': '5432',
+        'ENGINE': os.environ.get('DB_ENGINE', 'django.db.backends.postgresql'),
+        'NAME':     os.environ.get('DB_NAME',     'postgres'),       # 默认 'postgres';本机如需连 'go',通过 .env 注入 DB_NAME=go
+        'USER':     os.environ.get('DB_USER',     'postgres'),
+        'PASSWORD': os.environ.get('DB_PASSWORD', 'gsm200818534'),
+        'HOST':     os.environ.get('DB_HOST',     '192.168.18.245'), # 本地默认连局域网 PG;容器内由 compose 覆盖成 'postgres'
+        'PORT':     os.environ.get('DB_PORT',     '5432'),
     },
     # 可进行多数据库连接配置
     # 'db2': {
@@ -120,11 +121,14 @@ DATABASES = {
     # },
 }
 
-# Redis 设置配置--注意生产环境记得切换（开发）
-REDIS_HOST = "10.1.1.136"
-REDIS_PORT = 6379
-REDIS_PASSWORD = "gsm200818534"
-REDIS_DB = 5
+# Redis 设置配置 — 与上面同理:
+#   - 本地跑 (run_all.py):默认连内网 Redis 192.168.18.245:6379 db=5
+#   - 容器跑 (docker compose):由 compose 文件覆盖 REDIS_HOST 为 'redis'
+# 注意生产环境记得切换(开发)
+REDIS_HOST     = os.environ.get('REDIS_HOST',     '192.168.18.245')
+REDIS_PORT     = int(os.environ.get('REDIS_PORT', '6379'))
+REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', 'gsm200818534')
+REDIS_DB       = int(os.environ.get('REDIS_DB',   '5'))
 REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
 
 # 正式环境-服务器 请使用docker名称进行填写

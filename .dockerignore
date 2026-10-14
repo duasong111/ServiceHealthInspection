@@ -1,57 +1,65 @@
-# 排除不必要文件，减小镜像 + 加快 build
-.git
-.gitignore
-.github
-.gitattributes
-
-# Python 缓存
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache
-.mypy_cache
-.ruff_cache
-
-# 虚拟环境
-.venv
+# ===== Python 编译产物 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.venv/
 venv/
 env/
 
-# IDE / 编辑器
-.vscode
-.idea
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-
-# 文档（不进镜像）
-README.md
-docs/
-*.md
-
-# 测试
+# ===== 测试 / 文档 =====
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 tests/
 test/
-*.py.test
-.pytest_cache
 
-# 本地脚本
-apply_dp_migration.py
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
 
-# 数据 / 日志 / 临时
-*.log
-logs/
-tmp/
-.env
-.env.local
+# ===== 版本控制 =====
+.git/
+.gitignore
+.gitattributes
 
-# Docker 相关
+# ===== 项目无关文件(进容器也用不到) =====
+README.md
+*.md
+docs/
+LICENSE
+.dockerignore
 Dockerfile
 docker-compose.yml
-.dockerignore
-entrypoint.sh
+docker-compose.local.yml
+.docker/
 
-# 设备端代码（不应打到后端镜像里）
-mqtt_cmd_handler.py
+# ===== 敏感 / 运行时配置 =====
+.env
+.env.*
+!.env.example
+.envrc
+
+# ===== 静态资源 / 媒体(让 Nginx / volume 挂) =====
+staticfiles/
+media/
+static/
+
+# ===== 临时文件 =====
+*.log
+*.tmp
+*.bak
+*.pid
+nul

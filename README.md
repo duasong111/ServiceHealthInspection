@@ -11,6 +11,7 @@
 - [技术栈](#技术栈)
 - [目录结构](#目录结构)
 - [本地开发(4 步走)](#本地开发-4-步走)
+- [🧪 端到端实战速查(从拉代码到登录后台)](#-端到端实战速查从拉代码到登录后台)
 - [Docker 部署](#docker-部署)
 - [可视化后台 (SimpleUI)](#可视化后台-simpleui)
 - [中规模架构亮点](#中规模架构亮点)
@@ -169,23 +170,25 @@ export INSPECTOR_FIELD_ENCRYPTION_KEY=上面输出的key
 
 ### 4) 迁移 + 启动
 
+> 下面的命令按 **macOS / Linux** 写,Windows 把 `python` 替换成 `.venv/Scripts/python.exe`、`source` 替换成 `.venv/Scripts/activate.bat` 即可。其他平台差异详细见 [🧪 端到端实战速查](#-端到端实战速查从拉代码到登录后台) 那节。
+
 ```bash
-# 建表
-.venv/Scripts/python manage.py makemigrations Inspector Timing Account
-.venv/Scripts/python manage.py migrate
+# 建表(已 commit 的 migrations 会自动被 Django 识别,No changes detected 是正常的)
+python manage.py makemigrations Inspector Timing Account
+python manage.py migrate                       # 推荐不带 app 参数,让 Django 按依赖顺序跑
 
 # 创建初始 superuser(可选,登录用)
-.venv/Scripts/python manage.py createsuperuser
-.venv/Scripts/python manage.py drf_create_token <你的用户名>     # 给这个用户签发一个 token
+python manage.py createsuperuser
+python manage.py drf_create_token <你的用户名>     # 给这个用户签发 API token
 
-# 起 web
-.venv/Scripts/python run_server.py
-#   监听 0.0.0.0:8000,uvicorn + ASGI
+# 起 web + Celery(三个角色)
+#   A) 一键起 web + worker + beat(同一个终端 + 颜色前缀,Ctrl+C 一并停):
+python run_all.py --kill-previous             # 推荐,会顺手杀掉上一个 :8000 占位进程和孤儿 beat
 
-# 起 Celery(另开一个终端)
-.venv/Scripts/python run_celery.py
-#   默认:worker + beat 单进程
-#   生产建议:worker / beat 拆两个进程,直接用 celery 命令
+#   B) 分窗口起(需要分别开三个终端):
+python run_server.py                          # uvicorn,监听 0.0.0.0:8000
+python run_celery.py --no-beat                # 终端 2:celery worker
+python run_celery.py --beat-only              # 终端 3:celery beat
 ```
 
 ### 5) 验证
@@ -208,30 +211,281 @@ curl http://127.0.0.1:8000/api/insperctor/teams/ \
 
 ---
 
-## Docker 部署
+## 🧪 端到端实战速查(从拉代码到登录后台)
+
+> 下面是一次真实的"冷启动 → 登录 admin → 看到数据"的全流程实录,把上面 4 步走串起来,同时把中间踩到的几个坑标注出来,方便后人参考。命令均在 macOS 上跑过,Linux/Windows 路径稍有差异(把 `python` 换成 `.venv/Scripts/python.exe`)。
+
+### 0) 拉代码并复用旧虚拟环境
 
 ```bash
-# 1) 准备密钥(写进 .env 文件,生产别提交到 git)
-echo "INSPECTOR_FIELD_ENCRYPTION_KEY=$(.venv/Scripts/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" > .env
-
-# 2) 起栈(postgres + redis + web + celery_worker + celery_beat)
-docker compose up -d --build
-
-# 3) 迁移
-docker compose exec web python manage.py migrate
-docker compose exec web python manage.py createsuperuser
-docker compose exec web python manage.py drf_create_token <用户名>
-
-# 4) 看日志
-docker compose logs -f web
-docker compose logs -f celery_worker
-docker compose logs -f celery_beat
+cd /Users/duasong/DevelopProject/BackProject/ServiceHealthInspection
+git pull origin main
+# 查看本次增量:53 files changed, +4277 -79(从 23d20a4 到 40fcd76)
 ```
 
-服务启动后:
-- Web: `http://<host>:8000`
-- Postgres: `localhost:5432`
-- Redis: `localhost:6379`(密码 `gsm200818534`)
+如果本机已经有别的项目的 `.venv` 也装过 Django/DRF,可以直接复用 —— 本项目 requirements 里的版本与 Django 6.1.2、DRF 3.18 兼容。
+
+```bash
+source /path/to/your/.venv/bin/activate   # macOS/Linux
+# 或
+.venv\Scripts\activate.bat                # Windows
+```
+
+### 1) 装依赖(注意一定要加 `-r`)
+
+```bash
+# ❌ 这种写法 pip 会去找名叫 "requirements.txt" 的发行包,必然报：
+#    ERROR: Could not find a version that satisfies the requirement requirements.txt
+pip install requirements.txt
+
+# ✅ 必须加 -r 才会按文件里的列表装
+pip install -r requirements.txt
+```
+
+依赖命中后,`pip` 会输出 `Requirement already satisfied ...` 对已经存在的版本,`Collecting ...` 对新增的(典型新增是 `django-simpleui`、`celery`、`requests`、`amqp`、`kombu` 等)。
+
+### 2) 生成 Fernet 加密 key(强烈建议显式注入)
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# 例:UmicxUN3GJXo2LTmudnRI5bsZJoeNnyI69HB_KmmzaE=
+# (每次运行都会生成不同的 key,所有 key 都有效,选一个粘过去)
+export INSPECTOR_FIELD_ENCRYPTION_KEY="把上面输出的字符串粘过来"
+```
+
+> 没设置环境变量也能起来,DEBUG 模式下会打一条 warning:
+> `INSPECTOR_FIELD_ENCRYPTION_KEY 未设置,使用 dev 兜底 key。生产请通过环境变量注入。`
+> 等到 `DEBUG=False` 时,这条不设直接 `ImproperlyConfigured`,见 [故障排查](#故障排查)。
+
+### 3) 初始化数据库
+
+```bash
+# 先看下当前状态:Inspector 0001-0003、Timing 0001,Account 没有迁移
+python manage.py showmigrations Inspector Timing Account
+# Inspector
+#  [ ] 0001_initial
+#  [ ] 0002_alter_monitoredservice_token
+#  [ ] 0003_probe_log_partitioning
+# Timing
+#  [ ] 0001_initial
+# Account
+#  (no migrations)
+```
+
+注意 `Account (no migrations)` —— **这是正常的**,不是漏写了。`Account/models.py` 里只有一行注释「复用 Django 内置 auth.User,本应用不自建 User model」,所以确实不需要建表。
+
+```bash
+# 1. 生成(会发现全部 No changes detected,因为迁移都进了仓库)
+python manage.py makemigrations Inspector Timing Account
+#  → No changes detected in apps 'Account', 'Timing', 'Inspector'
+
+# 2. ⚠️ 不要这样写 ↓↓↓(见故障排查 [migrate 的位置参数陷阱])
+# python manage.py migrate Inspector Timing
+# CommandError: Cannot find a migration matching 'Timing' from app 'Inspector'.
+# 原因:Django 的 migrate 是 `migrate <app_label> <migration_name>` 语法,
+#      第二个位置参数会被当成 "Inspector 这个 app 下的某个迁移名",自然找不到叫 Timing 的。
+
+# 3. ✅ 一次跑完所有应用(推荐)
+python manage.py migrate
+#  Applying Inspector.0001_initial... OK
+#  Applying Inspector.0002_alter_monitoredservice_token... OK
+#  Applying Inspector.0003_probe_log_partitioning... OK
+#  Applying Timing.0001_initial... OK
+#  ...
+```
+
+如果你执意要按 app 分批,得 **每个 app 单独写一次**:
+
+```bash
+python manage.py migrate Inspector
+python manage.py migrate Timing
+```
+
+### 4) 创建超级管理员
+
+```bash
+python manage.py createsuperuser
+# 用户名 (leave blank to use 'duasong'): duasong
+# 电子邮件地址: 2272168170@qq.com
+# Password: ********
+# Password (again): ********
+# Superuser created successfully.
+```
+
+也可以走 DRF 单独签发 API token(给前端/脚本用):
+
+```bash
+python manage.py drf_create_token <你的用户名>
+# Generated token  xxxxxxxxxxxxxxxxxxxxxxxx for user <你的用户名>
+```
+
+### 5) 一键起 web + worker + beat
+
+```bash
+python run_all.py
+# [main] ============================================================
+# [main]   Starting 3 service(s). Ctrl+C to stop all.
+# [main] ============================================================
+# [main] [web] pid=19465 started
+# [main] [worker] pid=19466 started
+# [main] [beat] pid=19467 started
+# [web]    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+# [worker] .> transport:   redis://:**@192.168.18.245:6379/6
+# [worker] .> results:     redis://:**@192.168.18.245:6379/7
+# [worker] .> concurrency: 2 (prefork)
+# [worker] [tasks]
+# [worker]   . Inspector.tasks.aggregate_daily_health_rate
+# [worker]   . Inspector.tasks.cleanup_old_probe_logs
+# [worker]   . Inspector.tasks.probe_all_active_services
+# [worker]   . Inspector.tasks.probe_one_service_task
+# [worker]   . Inspector.tasks.rotate_all_tokens
+# [worker]   . Inspector.tasks.run_ensure_probe_log_partitions
+# [worker]   . ServiceHealthInspection.celery.debug_ping
+```
+
+- `web / worker / beat` 三个子进程都用颜色前缀区分,Ctrl+C 一并停掉。
+- `-`-broker` 自动指向 `redis://:<REDIS_PASSWORD>@<REDIS_HOST>:<REDIS_PORT>/6`,
+  `result backend` 指向 `/7`,业务缓存走 `/5`(在 `settings.py` 顶部 REDIS_URL 定义)。
+
+如果上轮没干净退出,加了 `--kill-previous` 自动清端口和孤儿 beat:
+
+```bash
+python run_all.py --kill-previous
+```
+
+### 6) 浏览器登录 admin 看效果
+
+打开 <http://127.0.0.1:8000/admin/>,看到 SimpleUI 登录页:
+
+```
+用户名: duasong
+密码: ********
+```
+
+登录成功后侧边栏会自动出现 5 张本项目表:
+
+| 菜单 | 内容 |
+|---|---|
+| **团队管理 / Team** | 增删改查 `Team` |
+| **环境管理 / Environment** | 增删改查 `Environment`(dev / test / prod) |
+| **服务管理 / Monitored service** | 列表 + 两个批量 action(立即探测 / 轮换 Token) |
+| **探测日志 / Probe log** | 只读,按时间/服务/成功状态筛选 |
+| **每日健康率 / Daily service stat** | 只读,按日期/团队/环境筛选 |
+
+外加 Django 自带的 Users / Groups / Tokens,可以在 User 详情页直接看到该用户内联的 DRF Token。
+
+### 7) 一键验完完整链路
+
+```bash
+# 7.1 不需要鉴权的健康探针
+curl http://127.0.0.1:8000/api/insperctor/healthz/
+# → {"code":0,"message":"success","data":"ok"}
+
+# 7.2 拿 token
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/api/auth/login/ \
+  -H "Content-Type: application/json" \
+  -d '{"username":"duasong","password":"你的密码"}' | python -c "import sys,json; print(json.load(sys.stdin)['data']['token'])")
+echo $TOKEN
+
+# 7.3 带 token 调业务接口
+curl http://127.0.0.1:8000/api/insperctor/teams/ -H "Authorization: Token $TOKEN"
+
+# 7.4 手动派一次 fan-out 探测(可选,等不及 5 分钟 beat 也可以手动触发)
+python manage.py shell -c "from Inspector.tasks import probe_all_active_services; probe_all_active_services.delay()"
+```
+
+---
+
+## Docker 部署
+
+> Docker 编排用 **`profiles` + `override` 文件** 切成两个模式,各取所需:
+> - `postgres` / `redis` 服务标了 `profiles: ["infra"]`,默认 `up` 不会起。
+> - `docker-compose.local.yml` 是 override 文件,只在「宿主机已有 PG/Redis」时叠加上。
+
+### 场景 1 — 啥都没有,从零起(全套)
+
+```bash
+# 1) 准备密钥(从 .env 注入,生产别 commit)
+grep -q '^INSPECTOR_FIELD_ENCRYPTION_KEY=' .env || \
+  echo "INSPECTOR_FIELD_ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> .env
+
+# 2) 起栈:--profile infra 把 postgres + redis 也带起来
+docker compose --profile infra --env-file .env up -d --build
+
+# 3) 迁移 + 创建管理员(只跑一次)
+docker compose exec web python manage.py migrate
+docker compose exec web python manage.py createsuperuser
+
+# 4) 看日志
+docker compose logs -f web celery_worker celery_beat
+```
+
+服务起来后:
+
+| 入口 | URL |
+|---|---|
+| Web | `http://<host>:8000`(宿主机 / 容器所在机器) |
+| Postgres | `localhost:5432`(密码 `gsm200818534`) |
+| Redis | `localhost:6379`(密码 `gsm200818534`) |
+
+### 场景 2 — 宿主机已经有 PG / Redis(本项目当前生产用法)
+
+内网已经有 PG(192.168.x.x) / Redis 在跑,只想跑应用容器。override 文件把
+`DB_HOST` / `REDIS_HOST` 重定向到 `host.docker.internal`(macOS / Windows Docker Desktop) 或
+`172.17.0.1`(Linux 默认 bridge 网关)。
+
+```bash
+# 1) 同样的 .env 准备
+grep -q '^INSPECTOR_FIELD_ENCRYPTION_KEY=' .env || \
+  echo "INSPECTOR_FIELD_ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> .env
+
+# 2) 起栈 —— 只跑 web + worker + beat,postgres/redis 复用宿主机
+docker compose -f docker-compose.yml -f docker-compose.local.yml \
+               --env-file .env up -d --build
+
+# 3) 迁移 + 创建管理员(连的是宿主机 PG)
+docker compose exec web python manage.py migrate
+docker compose exec web python manage.py createsuperuser
+
+# 4) 看日志
+docker compose logs -f web celery_worker celery_beat
+```
+
+要换宿主机 / 端口 / 密码,在 shell 里覆盖即可,不用改文件:
+
+```bash
+LOCAL_DB_HOST=192.168.18.245  \
+LOCAL_DB_NAME=go            \
+LOCAL_REDIS_HOST=192.168.18.245 \
+docker compose -f docker-compose.yml -f docker-compose.local.yml \
+               --env-file .env up -d --build
+```
+
+### 场景 3 — 纯本机(连内网已有的 PG/Redis,不碰 docker)
+
+最简单,完全不依赖 docker。本项目目前的默认开发姿势。
+
+```bash
+source /path/to/.venv/bin/activate
+python run_all.py --kill-previous
+#   ⇒ web + worker + beat 三个进程,Ctrl+C 一并停
+```
+
+`settings.py` 里 `DB_HOST` / `REDIS_HOST` 默认就是 `192.168.18.245`(你局域网的
+PG / Redis),无需任何配置直接通。
+
+---
+
+### 三种场景对比
+
+| 维度 | 场景 1(全套) | 场景 2(已有基础设施) | 场景 3(纯本机) |
+|---|---|---|---|
+| 启 docker | ✅ | ✅ | ❌ |
+| 自起 PG/Redis 容器 | ✅ (`--profile infra`) | ❌(跳过) | ❌ |
+| 应用 DB_HOST | `postgres` (DNS) | `host.docker.internal` | `192.168.18.245` (局域网默认) |
+| 一个命令搞定 | `docker compose --profile infra up -d --build` | `docker compose -f ... -f docker-compose.local.yml up -d --build` | `python run_all.py` |
+| 数据持久化 | docker volume `postgres_data` | 宿主机 PG 自己的存储 | 宿主机 PG |
+| 适用人群 | 第一次接触本项目,什么都没有 | 内网已有 PG/Redis(你本次实战走这条) | 日常开发调样式 |
 
 ---
 
@@ -531,6 +785,54 @@ run_ensure_probe_log_partitions.delay()
 ---
 
 ## 故障排查
+
+**`ERROR: Could not find a version that satisfies the requirement requirements.txt`**
+
+写成了 `pip install requirements.txt`,pip 把 `requirements.txt` 当成「叫这个名字的发行包」去找,当然找不到。
+**正解**:`pip install -r requirements.txt`(加 `-r`)。
+
+**`migrate Inspector Timing` 报 `Cannot find a migration matching 'Timing' from app 'Inspector'`**
+
+Django 的 `migrate` 语法是 `migrate <app_label> [<migration_name>]`,第二个位置参数被当成了「在第一个 app 里找某条迁移」。所以 `migrate Inspector Timing` 的意思是「去 Inspector 里找叫 Timing 的迁移」—— 当然没有。
+
+**正解**:要么直接 `python manage.py migrate`(推荐),要么每个 app 拆开写:
+
+```bash
+python manage.py migrate Inspector
+python manage.py migrate Timing
+```
+
+**绝对不要**写成 `migrate Inspector Timing Account`,App 越多越容易翻车。
+
+**`django.core.exceptions.ImproperlyConfigured: Application labels aren't unique, duplicates: <App名>`**
+
+冷启动时偶发,典型原因有二:
+
+1. 本地 `__pycache__/` 残留的字节码文件和当前代码不一致 —— `find . -name __pycache__ -exec rm -rf {} +` 清掉再来。
+2. 真正写重复了:两个不同 app 在 `INSTALLED_APPS` 里 `default_auto_field` 计算出的 label 冲突,或者 `AppConfig.name` 路径解析后撞了另一个 app。
+
+排查方法:`python manage.py check` 会列出冲突的具体 app 名,照着去改 `INSTALLED_APPS` 或 `AppConfig.label`。
+最稳的兜底是 `find . -name __pycache__ -exec rm -rf {} +` 后重新跑 `python manage.py migrate`(不带 app 参数,让 Django 自己按依赖顺序来)。
+
+**`UserWarning: INSPECTOR_FIELD_ENCRYPTION_KEY 未设置,使用 dev 兜底 key。生产请通过环境变量注入。`**
+
+DEBUG 模式下的预期行为 —— 表示没设 Fernet 加密 key,系统用了一个写死在 `settings.py` 里的 dev 兜底 key(`_DEV_FALLBACK_KEY`)。
+
+- DEBUG 模式:无视警告也能用,**别用于生产**(所有加密的 Token 都能被这个 key 解出来)。
+- 生产 / `DEBUG=False`:未设置直接 `ImproperlyConfigured` 拒绝启动,见上面「关键配置项」一节。
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+export INSPECTOR_FIELD_ENCRYPTION_KEY="上面输出的字符串"
+```
+
+**`Warning: StreamingHttpResponse must consume synchronous iterators in order to serve them asynchronously. Use an asynchronous iterator instead.`**
+
+simpleui 静态文件在 ASGI 模式下的已知噪音,不影响功能。三种处理方式:
+
+1. 忽略 —— 静态资源照样返回 200。
+2. 起开发服务时用 WSGI 而不是 ASGI:`python manage.py runserver`(自动走 WSGI,不会触发这条 warning)。
+3. 生产用 `gunicorn` / `uwsgi`(本项目默认 WSGI),不上 ASGI,自然没这条。
 
 **`ImproperlyConfigured: Error loading psycopg2 or psycopg module`**
 `psycopg[binary]` 没装。`pip install "psycopg[binary]>=3.1"`。

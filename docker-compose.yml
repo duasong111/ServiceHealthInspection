@@ -1,7 +1,27 @@
-# docker-compose.yml — 本项目一键起 PostgreSQL + Redis + Web + Celery
+# docker-compose.yml — 一键编排本项目
 #
-# 共用环境变量抽到 x-common-env 锚,web / celery_worker / celery_beat 都引用
-# 密钥建议通过 .env 文件或 Docker secrets 注入,这里只放占位。
+# 设计:用 **profile** 把"基础设施类"服务和"应用类"服务分开。
+#
+#   ┌──────────────────────────────────────────────────────────────────────┐
+#   │ 场景 1 — 啥都没有,从零起:                                            │
+#   │   docker compose --profile infra up -d --build                       │
+#   │     ⇒ 起 postgres + redis + web + celery_worker + celery_beat         │
+#   │     ⇒ 容器内 DB_HOST=postgres  REDIS_HOST=redis                       │
+#   │                                                                      │
+#   │ 场景 2 — 宿主机已有 PG / Redis,只想跑应用容器:                          │
+#   │   docker compose -f docker-compose.yml -f docker-compose.local.yml   │
+#   │                   up -d --build                                      │
+#   │     ⇒ 仅起 web + celery_worker + celery_beat                          │
+#   │     ⇒ override 把 DB_HOST/REDIS_HOST 重定向为 host.docker.internal     │
+#   │                                                                      │
+#   │ 场景 3 — 纯本机调试(连内网已有的 PG/Redis):                            │
+#   │   python run_all.py                                                  │
+#   │     ⇒ settings.py 走默认 192.168.18.245,无需 docker                    │
+#   └──────────────────────────────────────────────────────────────────────┘
+#
+# 共享环境变量抽到 x-common-env 锚;web/worker/beat 复用;密钥通过 .env 注入。
+# .env 文件本身由 `Common/env.py` 在 settings.py 里加载;docker 不会自动读 .env,
+# 需要在 shell 里 `export` 或用 `docker compose --env-file .env`。
 
 x-common-env: &common-env
   DJANGO_SETTINGS_MODULE: ServiceHealthInspection.settings
@@ -9,6 +29,7 @@ x-common-env: &common-env
   DB_NAME: postgres
   DB_USER: postgres
   DB_PASSWORD: gsm200818534
+  # 默认假设应用与基础设施在同一 compose 网络内;场景 2 会通过 override 文件重写
   DB_HOST: postgres
   DB_PORT: "5432"
   TZ: Asia/Shanghai
@@ -21,6 +42,7 @@ services:
   postgres:
     image: postgres:15
     container_name: shi_postgres
+    profiles: ["infra"]     # ⭐ 只有 --profile infra 才会起它
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
@@ -40,6 +62,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: shi_redis
+    profiles: ["infra"]     
     command: ["redis-server", "--requirepass", "gsm200818534"]
     ports:
       - "6379:6379"
@@ -57,6 +80,8 @@ services:
     image: shi_service:latest
     container_name: shi_web
     command:
+      - "python"
+      - "-m"
       - "uvicorn"
       - "ServiceHealthInspection.asgi:application"
       - "--host"
@@ -66,19 +91,26 @@ services:
       - "--workers"
       - "2"
     volumes:
-      # 只挂载代码(开发用 hot-reload);生产建议改 image tag,不挂载
+      # 挂代码做开发用;生产改 image tag 去掉这条
       - .:/app
     ports:
       - "8000:8000"
     environment:
       <<: *common-env
-      # INSPECTOR_FIELD_ENCRYPTION_KEY 从同目录 .env 文件读,不要提交到 git
+      # INSPECTOR_FIELD_ENCRYPTION_KEY 从 .env 文件读,不要 commit
       INSPECTOR_FIELD_ENCRYPTION_KEY: ${INSPECTOR_FIELD_ENCRYPTION_KEY}
+    extra_hosts:
+      # 让容器内能用 host.docker.internal 指向宿主机(场景 2 用到)
+      - "host.docker.internal:host-gateway"
     depends_on:
+      # ⭐ 注意:当 postgres/redis 服务因为 profile 未启而被跳过时,
+      #   depends_on 引用会被 docker-compose 自动忽略,不会卡 web 启动。
       postgres:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
+        required: false
     restart: unless-stopped
 
   celery_worker:
@@ -86,6 +118,8 @@ services:
     image: shi_service:latest
     container_name: shi_celery_worker
     command:
+      - "python"
+      - "-m"
       - "celery"
       - "-A"
       - "ServiceHealthInspection"
@@ -97,11 +131,15 @@ services:
     environment:
       <<: *common-env
       INSPECTOR_FIELD_ENCRYPTION_KEY: ${INSPECTOR_FIELD_ENCRYPTION_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
+        required: false
     restart: unless-stopped
 
   celery_beat:
@@ -109,6 +147,8 @@ services:
     image: shi_service:latest
     container_name: shi_celery_beat
     command:
+      - "python"
+      - "-m"
       - "celery"
       - "-A"
       - "ServiceHealthInspection"
@@ -119,11 +159,15 @@ services:
     environment:
       <<: *common-env
       INSPECTOR_FIELD_ENCRYPTION_KEY: ${INSPECTOR_FIELD_ENCRYPTION_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
+        required: false
     restart: unless-stopped
 
 volumes:

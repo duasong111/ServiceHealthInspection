@@ -2,6 +2,7 @@
 Django==6.1.2
 djangorestframework==3.18.3
 django-cors-headers==4.9.0
+uvicorn[standard]>=0.30          # ASGI server,run_server.py 与 docker CMD 都依赖它
 
 # ===== Django Admin 美化主题 =====
 django-simpleui>=2024.1
