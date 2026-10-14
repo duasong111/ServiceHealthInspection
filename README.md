@@ -4,7 +4,7 @@
 
 ---
 
-## 📸 项目截图
+##  项目部分截图展示
 
 按使用流程顺序展示 7 张关键页面:
 
@@ -32,7 +32,11 @@
 
 ![健康率统计](Image/jiankang5.png)
 
-### 7️⃣ Docker 部署
+### 7️⃣ 请求耗时统计
+
+![请求耗时](Image/haoshi.png)
+
+### 8️⃣ Docker 部署
 
 ![Docker 部署](Image/bushu.png)
 
@@ -392,7 +396,7 @@ python run_all.py --kill-previous
 打开 <http://127.0.0.1:8000/admin/>,看到 SimpleUI 登录页:
 
 ```
-用户名: duasong
+用户名: admin
 密码: ********
 ```
 
