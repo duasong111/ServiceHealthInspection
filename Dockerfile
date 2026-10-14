@@ -1,11 +1,11 @@
 # ============================================================
-# 多阶段构建：builder 装依赖 → runtime 只带运行时需要的
+# 多阶段构建:builder 装依赖 → runtime 只带运行时需要的
 # ============================================================
 
 # ---------- Stage 1: builder ----------
 FROM python:3.12-slim-bookworm AS builder
 
-# 系统依赖（编译阶段需要）
+# 系统依赖(编译阶段需要)
 RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     printf "deb https://mirrors.aliyun.com/debian/ bookworm main contrib non-free non-free-firmware\n" \
         > /etc/apt/sources.list && \
@@ -27,14 +27,13 @@ RUN python -m pip install --upgrade pip -i https://mirrors.tuna.tsinghua.edu.cn/
     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/ && \
     pip config set global.trusted-host mirrors.tuna.tsinghua.edu.cn
 
-# 先 COPY requirements 单独一层（依赖不变就不重新安装）
+# 先 COPY requirements 单独一层(依赖不变就不重新安装)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/
 
 # ---------- Stage 2: runtime ----------
 FROM python:3.12-slim-bookworm AS runtime
 
-# runtime 只需要运行时库（不需要 gcc / build-essential）
 RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     printf "deb https://mirrors.aliyun.com/debian/ bookworm main contrib non-free non-free-firmware\n" \
         > /etc/apt/sources.list && \
@@ -63,7 +62,6 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # 复制项目代码
 COPY . .
 
-# 设置权限（已去掉 entrypoint.sh）
 RUN chown -R appuser:appuser /app
 
 USER appuser
@@ -72,7 +70,8 @@ EXPOSE 8000
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    DJANGO_SETTINGS_MODULE=YTInternetBack.settings \
+    DJANGO_SETTINGS_MODULE=ServiceHealthInspection.settings \
     PORT=8000
 
-CMD ["uvicorn", "YTInternetBack.asgi:application", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# 镜像本身只承载 web 进程;celery worker / beat 用同一镜像但通过 docker-compose 覆盖 command
+CMD ["uvicorn", "ServiceHealthInspection.asgi:application", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

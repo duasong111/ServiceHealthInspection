@@ -1,0 +1,23 @@
+# ===== Web 框架 =====
+Django==6.1.2
+djangorestframework==3.18.3
+django-cors-headers==4.9.0
+
+# ===== Django Admin 美化主题 =====
+django-simpleui>=2024.1
+
+# ===== 字段加密(需求 ③ Token)=====
+# 改用自实现 EncryptedCharField(见 Common/fields.py),不再依赖 django-cryptography
+# django-cryptography 1.1 与 Django >=5.0 不兼容(内部 import 已移除的 django.utils.baseconv)
+cryptography>=42.0
+
+# ===== PostgreSQL 驱动 =====
+# Django 6.1 原生支持 psycopg 3,推荐用 [binary] 免编译
+psycopg[binary]>=3.1
+
+# ===== HTTP 客户端(需求 ② 主动探测)=====
+requests>=2.31
+
+# ===== Celery + Redis(下一步:周期任务)=====
+celery>=5.3
+redis>=5.0

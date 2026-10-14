@@ -1,7 +1,26 @@
+# docker-compose.yml — 本项目一键起 PostgreSQL + Redis + Web + Celery
+#
+# 共用环境变量抽到 x-common-env 锚,web / celery_worker / celery_beat 都引用
+# 密钥建议通过 .env 文件或 Docker secrets 注入,这里只放占位。
+
+x-common-env: &common-env
+  DJANGO_SETTINGS_MODULE: ServiceHealthInspection.settings
+  DB_ENGINE: django.db.backends.postgresql
+  DB_NAME: postgres
+  DB_USER: postgres
+  DB_PASSWORD: gsm200818534
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  TZ: Asia/Shanghai
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: gsm200818534
+  REDIS_DB: "5"
+
 services:
   postgres:
     image: postgres:15
-    container_name: yt_service-postgres
+    container_name: shi_postgres
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
@@ -18,16 +37,28 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: shi_redis
+    command: ["redis-server", "--requirepass", "gsm200818534"]
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "gsm200818534", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   web:
     build:
       context: .
       dockerfile: Dockerfile
-    image: yt_service:latest
-    container_name: yt_service
-    # entrypoint 自动 wait-postgres + migrate，再 exec CMD
+    image: shi_service:latest
+    container_name: shi_web
     command:
       - "uvicorn"
-      - "YTInternetBack.asgi:application"
+      - "ServiceHealthInspection.asgi:application"
       - "--host"
       - "0.0.0.0"
       - "--port"
@@ -35,60 +66,64 @@ services:
       - "--workers"
       - "2"
     volumes:
-      # 只挂载代码（开发用 hot-reload）；生产建议改 image tag，不挂载
+      # 只挂载代码(开发用 hot-reload);生产建议改 image tag,不挂载
       - .:/app
-      # 防止容器里 manage.py / settings.py / mqtt_cmd_handler.py 被 host 覆盖
-      - /app/node_modules  # 占位避免冲突
     ports:
       - "8000:8000"
     environment:
-      DJANGO_SETTINGS_MODULE: YTInternetBack.settings
-      DB_ENGINE: django.db.backends.postgresql
-      DB_NAME: postgres
-      DB_USER: postgres
-      DB_PASSWORD: gsm200818534
-      DB_HOST: yt_service-postgres
-      DB_PORT: "5432"
-      TZ: Asia/Shanghai
-      # MQTT
-      MQTT_BROKER_HOST: "8.134.128.64"
-      MQTT_BROKER_PORT: "1883"
-      MQTT_USERNAME: "yt_device"
-      MQTT_PASSWORD: "gsm200818534"
+      <<: *common-env
+      # INSPECTOR_FIELD_ENCRYPTION_KEY 从同目录 .env 文件读,不要提交到 git
+      INSPECTOR_FIELD_ENCRYPTION_KEY: ${INSPECTOR_FIELD_ENCRYPTION_KEY}
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
 
-  mqtt_retry_scheduler:
-    # 复用 web 的镜像（同一份代码）
-    image: yt_service:latest
-    container_name: yt_service-mqtt-retry
+  celery_worker:
+    # 与 web 共用镜像,只覆盖 command
+    image: shi_service:latest
+    container_name: shi_celery_worker
     command:
-      - "python"
-      - "manage.py"
-      - "mqtt_retry_scheduler"
+      - "celery"
+      - "-A"
+      - "ServiceHealthInspection"
+      - "worker"
+      - "--loglevel=info"
+      - "--concurrency=2"
     volumes:
       - .:/app
     environment:
-      DJANGO_SETTINGS_MODULE: YTInternetBack.settings
-      DB_ENGINE: django.db.backends.postgresql
-      DB_NAME: postgres
-      DB_USER: postgres
-      DB_PASSWORD: gsm200818534
-      DB_HOST: yt_service-postgres
-      DB_PORT: "5432"
-      TZ: Asia/Shanghai
-      # MQTT
-      MQTT_BROKER_HOST: "8.134.128.64"
-      MQTT_BROKER_PORT: "1883"
-      MQTT_USERNAME: "yt_device"
-      MQTT_PASSWORD: "gsm200818534"
+      <<: *common-env
+      INSPECTOR_FIELD_ENCRYPTION_KEY: ${INSPECTOR_FIELD_ENCRYPTION_KEY}
     depends_on:
       postgres:
         condition: service_healthy
-      web:
-        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  celery_beat:
+    # beat 与 worker 必须分开部署,否则 beat 的定时状态会被 worker 抢着 lock
+    image: shi_service:latest
+    container_name: shi_celery_beat
+    command:
+      - "celery"
+      - "-A"
+      - "ServiceHealthInspection"
+      - "beat"
+      - "--loglevel=info"
+    volumes:
+      - .:/app
+    environment:
+      <<: *common-env
+      INSPECTOR_FIELD_ENCRYPTION_KEY: ${INSPECTOR_FIELD_ENCRYPTION_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

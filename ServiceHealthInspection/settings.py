@@ -11,6 +11,14 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 from pathlib import Path
+import os
+
+# 必须在最前面:把项目根 .env 里的 KEY=VALUE 加载到 os.environ
+from Common.env import load_dotenv  # noqa: E402
+load_dotenv()
+
+from celery.schedules import crontab
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -36,20 +44,25 @@ CORS_ORIGIN_ALLOW_ALL = True
 # Application definition
 
 INSTALLED_APPS = [
+    'simpleui',                   # 使用simpleui-简陋后台
     'corsheaders',
+    'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
-    'Inspector',
-    'Timing'
+    'rest_framework.authtoken',           # DRF Token 鉴权
+    'Account.apps.AccountConfig',         # 登录/登出/当前用户
+    'Inspector.apps.InspectorConfig',     # 巡检服务
+    'Timing.apps.TimingConfig',           # 请求耗时
 ]
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'Timing.middleware.RequestTimingMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -122,6 +135,16 @@ REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
 # REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
 
 
+# Django 缓存后端(Common.cache 用的)
+# 生产用 Redis 复用现有 db=5;测试环境(test_settings.py)会用 locmem 覆盖
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': REDIS_URL,
+    },
+}
+
+
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
 
@@ -142,9 +165,10 @@ AUTH_PASSWORD_VALIDATORS = [
 
 
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = 'zh-hans'
 
-TIME_ZONE = 'UTC'
+# 业务时区用上海(题目要求 00:00 按上海时区聚合)
+TIME_ZONE = 'Asia/Shanghai'
 
 USE_I18N = True
 
@@ -153,10 +177,182 @@ USE_TZ = True
 
 
 STATIC_URL = 'static/'
+# dev 模式直接用 staticfiles_urlpatterns() 走各 app 的 static/,
+# 生产模式用 collectstatic 收到这里
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+
+SIMPLEUI_DEFAULT_THEME = 'simpleui.css'
+SIMPLEUI_HOME_PAGE = '/admin/'               # 点 logo 回首页
+SIMPLEUI_HIDE_FOREVER_MODELS = [             # 隐藏内置的不需要看的表
+    'django_celery_beat.models',
+    'django_celery_results.models',
+]
+SIMPLEUI_LOGIN_TITLE = 'Service Health Inspection'
+SIMPLEUI_LOGO = ''
+SIMPLEUI_INDEX_TITLE = '服务健康巡检管理后台'
+
+# 增强 ④:DRF 全局鉴权配置 — 默认所有 API 需要登录(白名单单独 override)
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',
+        'rest_framework.authentication.SessionAuthentication',  # admin 用
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'UNAUTHENTICATED_USER': 'django.contrib.auth.models.AnonymousUser',
+    # 自定义异常 handler:把 DRF 内置异常包成 {code, message, data} 统一格式
+    'EXCEPTION_HANDLER': 'Common.exception_handler.custom_exception_handler',
+}
 
 
 MAILERS = {
     'default': {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+    },
+}
+
+
+# =========================================================================== #
+# LOGGING — 每条日志自动带 request_id(RequestIDFilter 注入)
+# =========================================================================== #
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {
+        'request_id': {
+            '()': 'Common.logging_filters.RequestIDFilter',
+        },
+    },
+    'formatters': {
+        'standard': {
+            'format': '[%(asctime)s] [%(levelname)s] [req=%(request_id)s] %(name)s: %(message)s',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'filters': ['request_id'],
+            'formatter': 'standard',
+        },
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django.time': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'Inspector': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'Timing': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+}
+
+
+# =========================================================================== #
+# 字段加密密钥(INSPECTOR_FIELD_ENCRYPTION_KEY)
+# =========================================================================== #
+# 读取顺序:
+#   1) 环境变量 INSPECTOR_FIELD_ENCRYPTION_KEY(生产必须设置)
+#   2) DEBUG 模式:使用一个固定的 dev 兜底 key,启动会打 WARNING 提醒
+#   3) 生产模式(DEBUG=False):未设置时直接 ImproperlyConfigured,拒绝启动
+#
+# 生成新 key:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+_DEV_FALLBACK_KEY = 'vzCXHpYGV4qtWyEcekdVdZX6u2Vff-r5EfrRyS7kkr0='  # 仅 DEBUG 用
+
+INSPECTOR_FIELD_ENCRYPTION_KEY = os.environ.get('INSPECTOR_FIELD_ENCRYPTION_KEY')
+if INSPECTOR_FIELD_ENCRYPTION_KEY:
+    FIELD_ENCRYPTION_KEY = INSPECTOR_FIELD_ENCRYPTION_KEY
+elif DEBUG:
+    import warnings
+    FIELD_ENCRYPTION_KEY = _DEV_FALLBACK_KEY
+    warnings.warn(
+        'INSPECTOR_FIELD_ENCRYPTION_KEY 未设置,使用 dev 兜底 key。'
+        '生产请通过环境变量注入。',
+        stacklevel=1,
+    )
+else:
+    raise ImproperlyConfigured(
+        'INSPECTOR_FIELD_ENCRYPTION_KEY 环境变量必须设置。'
+        '生成方式:python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
+    )
+
+
+# ===== Timing 中间件可调参数 =====
+# 被这些前缀命中的请求不打 timing 日志也不落库,常用于静态资源、健康检查等噪声路径
+TIMING_EXCLUDE_PREFIXES = (
+    '/static/',
+    '/media/',
+    '/favicon.ico',
+    '/healthz',
+)
+
+
+# =========================================================================== #
+# Celery
+# =========================================================================== #
+# broker / backend 复用现有 Redis,业务缓存 db=5 与 celery db=6/7 隔离
+CELERY_BROKER_URL = REDIS_URL.rsplit('/', 1)[0] + '/6'
+CELERY_RESULT_BACKEND = REDIS_URL.rsplit('/', 1)[0] + '/7'
+
+# Redis broker:未 ack 的探测任务最多 30 min 可见(避免 worker 挂掉后任务被重投,但够慢探测用)
+CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': 1800}
+
+CELERY_TIMEZONE = 'Asia/Shanghai'      # beat 调度按上海时区触发(题目要求 00:00)
+CELERY_ENABLE_UTC = True               # 内部存储仍用 UTC
+# 全局 hard/soft limit:per-task 在 @shared_task 里覆盖
+#   - 单次探测任务:soft=15s, hard=20s
+#   - 单次清理任务:soft=30min, hard=40min
+# 这里兜底留大点,别把聚合/清理卡死
+CELERY_TASK_TIME_LIMIT = 30 * 60
+CELERY_TASK_SOFT_TIME_LIMIT = 28 * 60
+CELERY_TASK_ACKS_LATE = True           # 任务失败/超时也不丢失,便于排查
+CELERY_WORKER_PREFETCH_MULTIPLIER = 4
+
+# 周期任务:crontab 表达式按 Asia/Shanghai 解释
+CELERY_BEAT_SCHEDULE = {
+    # 需求 ③:每 8 小时轮换所有 active 服务的 Token(00:00 / 08:00 / 16:00)
+    'inspector.rotate-tokens-every-8h': {
+        'task': 'Inspector.tasks.rotate_all_tokens',
+        'schedule': crontab(minute=0, hour='*/8'),
+    },
+    # 需求 ④:每天 00:00 聚合昨日健康率
+    'inspector.aggregate-daily-health-rate': {
+        'task': 'Inspector.tasks.aggregate_daily_health_rate',
+        'schedule': crontab(minute=0, hour=0),
+    },
+    # 增强 ③:每 5 分钟 fan-out 派单(本任务秒回,真正探测在 probe_one_service_task 里跑)
+    'inspector.probe-all-active-every-5min': {
+        'task': 'Inspector.tasks.probe_all_active_services',
+        'schedule': crontab(minute='*/5'),
+    },
+    # 中规模 ①:每天 01:00 删 20 天前的 ProbeLog(00:00 聚合完才动)
+    'inspector.cleanup-old-probe-logs-daily': {
+        'task': 'Inspector.tasks.cleanup_old_probe_logs',
+        'schedule': crontab(minute=0, hour=1),
+        'kwargs': {'days': 20},
+    },
+    # 中规模 ②:每月 1 号 00:30 滚动建分区(等 00:00 聚合完,留 30 min buffer)
+    'inspector.ensure-probe-log-partitions-monthly': {
+        'task': 'Inspector.tasks.run_ensure_probe_log_partitions',
+        'schedule': crontab(minute=30, hour=0, day_of_month=1),
     },
 }
